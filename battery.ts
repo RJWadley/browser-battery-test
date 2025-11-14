@@ -294,9 +294,21 @@ function computeSamplesPerSite(
  * Formats a duration in seconds into a human-readable string.
  */
 function formatSeconds(totalSeconds: number): string {
-	const minutes = Math.floor(totalSeconds / 60);
-	const seconds = Math.floor(totalSeconds % 60);
-	return `${minutes}m ${seconds}s`;
+	const wholeSeconds = Math.floor(totalSeconds);
+	const hours = Math.floor(wholeSeconds / 3600);
+	const minutes = Math.floor((wholeSeconds % 3600) / 60);
+	const seconds = wholeSeconds % 60;
+	// prefer hours+minutes when >= 1 hour to avoid noisy second-level flicker
+	if (hours > 0) {
+		if (minutes > 0) return `${hours}h ${minutes}m`;
+		return `${hours}h`;
+	}
+	// for sub-hour durations, keep minutes+seconds for better granularity
+	if (minutes > 0) {
+		if (seconds > 0) return `${minutes}m ${seconds}s`;
+		return `${minutes}m`;
+	}
+	return `${seconds}s`;
 }
 
 /**
