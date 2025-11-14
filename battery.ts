@@ -5,12 +5,20 @@ import { createInterface } from "node:readline";
 
 // --- Configuration ---
 const browsers = [
+	// Test the browsers that misbehave first
+	// Arc
+	"Arc",
+	// dia
+	"Dia",
+	// ChatGPT Atlas
+	"ChatGPT Atlas",
+	// deta surf
+	"Surf",
+
 	// Chrome
 	"Google Chrome",
 	// Edge
 	"Microsoft Edge",
-	// Arc
-	"Arc",
 	// Helium
 	"Helium",
 	// Zen
@@ -18,8 +26,6 @@ const browsers = [
 
 	// comet
 	"Comet",
-	// ChatGPT Atlas
-	"ChatGPT Atlas",
 
 	// Vivaldi
 	"Vivaldi",
@@ -39,37 +45,37 @@ const browsers = [
 	"Firefox",
 	// ladybird (future)
 	// "Ladybird",
-	// dia
-	"Dia",
-	// deta surf
-	"Surf",
 ];
 
 const urls = [
 	// social sites
 	"https://x.com/taylorswift13",
 	"https://www.reddit.com/r/popular/",
-	"https://www.instagram.com/dropouttv/",
-	"https://www.linkedin.com/company/meta/",
-	"https://www.pinterest.com/",
+	"https://www.tumblr.com/taylorswift",
+	"https://www.facebook.com/TaylorSwift/",
+	"https://www.threads.com/@taylorswift",
+
 	// streaming sites
 	"https://www.youtube.com/watch?v=dQw4w9WgXcQ",
 	"https://www.twitch.tv/",
 	"https://vimeo.com/1084537?autoplay=true",
 	"https://open.spotify.com/browse",
 	"https://www.tiktok.com/foryou",
+
 	// news sites
 	"https://www.cnn.com/",
 	"https://www.theverge.com/",
 	"https://www.dailymail.co.uk/",
 	"https://www.espn.com/",
 	"https://www.weather.com/",
+
 	// shopping sites
 	"https://www.amazon.com/",
 	"https://www.google.com/maps",
 	"https://www.airbnb.com/",
 	"https://www.apple.com/iphone/",
 	"https://www.ebay.com/",
+
 	// other sites
 	"https://en.wikipedia.org/wiki/Main_Page",
 	"https://github.com/torvalds/linux",
@@ -77,12 +83,13 @@ const urls = [
 	"https://docs.google.com/document/create",
 	"https://threejs.org/examples/#webgl_animation_keyframes",
 ];
-const waitTimeSeconds = 5;
-const sampleIntervalMs = 1000;
+const waitTimeSeconds = 10;
+const sampleIntervalMs = 500;
 
 // Estimated overheads in seconds for ETC calculation
 const ETC_DRIFT_WARNING_SECONDS = 3; // warn when recalculated deadline shifts by more than this
 const LOG_DIR = "logs";
+const RESULTS_FILE = "results.json";
 // ---
 
 // sleep delays (ms); centralize here to tune timings in one place
@@ -92,32 +99,38 @@ const WINDOW_CLOSE_DELAY_MS = 500;
 const BROWSER_QUIT_DELAY_MS = 2000;
 const POWERMETRICS_STOP_DELAY_MS = 500;
 
-async function launchBrowser(browser: string) {
-	await $`open -na "/Applications/${browser}.app"`.quiet();
-	await closeWindows(browser);
-}
-
 async function openUrlInBrowser(browser: string, url: string) {
-	// const cfg = getBrowserControl(browser);
-	// if (cfg.openUrlMethod === "applescript-open-location") {
-	// 	// use AppleScript open location; works for many browsers that register URL handler
-	// 	await $`osascript -e 'tell application "${browser}" to activate'`.quiet();
-	// 	await $`osascript -e 'tell application "${browser}" to open location "${url}"'`.quiet();
-	// 	return;
-	// }
-	// // default: macOS 'open' targeting the application (or bundle id if provided)
-	// if (cfg.bundleId) {
-	// 	await $`open -b ${cfg.bundleId} ${url}`.quiet();
-	// } else {
-	await $`open -a "${browser}" "${url}"`.quiet();
-	// }
+	await $`open -a "/Applications/${browser}.app" "${url}"`.quiet();
+
+	if (browser === "Arc") {
+		await osaInBrowser(
+			browser,
+			`tell application "System Events" to keystroke "t" using {command down}`,
+		);
+		await osaInBrowser(
+			browser,
+			`tell application "System Events" to key code 53`,
+		);
+	}
 }
 
-async function closeWindows(browser: string) {
-	await $`osascript -e 'tell application "${browser}" to close first window' || exit 0`.quiet();
-	await $`osascript -e 'tell application "${browser}" to close first window' || exit 0`.quiet();
-	await $`osascript -e 'tell application "${browser}" to close first window' || exit 0`.quiet();
-	await $`osascript -e 'tell application "${browser}" to close first window' || exit 0`.quiet();
+async function osaInBrowser(browser: string, script: string) {
+	await $`open -a "/Applications/${browser}.app" && osascript -e '${script}'`.quiet();
+}
+
+async function closeTab(browser: string) {
+	await osaInBrowser(
+		browser,
+		`tell application "System Events" to keystroke "w" using {command down}`,
+	);
+	await osaInBrowser(
+		browser,
+		`tell application "System Events" to keystroke "w" using {command down}`,
+	);
+}
+
+async function launchBrowser(browser: string) {
+	await $`open -a "/Applications/${browser}.app"`;
 }
 
 async function quitBrowser(browser: string) {
@@ -158,6 +171,122 @@ function parsePowerLog(log: string): {
 	const max = Math.max(...readings);
 
 	return { avg, max, count: readings.length };
+}
+
+/**
+ * returns all power samples discovered in the log as a time-ordered array.
+ * we keep this separate from parsePowerLog() so we can store raw samples
+ * for later analysis and derive per-site stats.
+ */
+function extractPowerSamples(log: string): number[] {
+	const samples: number[] = [];
+	const regex = /Combined Power \(CPU \+ GPU \+ ANE\): (\d+) mW/g;
+	let match: RegExpExecArray | null = regex.exec(log);
+	while (match !== null) {
+		const capturedMilliwatts = match[1];
+		if (typeof capturedMilliwatts === "string") {
+			samples.push(Number.parseInt(capturedMilliwatts, 10));
+		}
+		match = regex.exec(log);
+	}
+	return samples;
+}
+
+type SiteAverage = {
+	index: number;
+	url: string;
+	avg: number;
+	count: number;
+};
+
+/**
+ * estimates per-site averages by slicing the raw samples into contiguous
+ * chunks that align with our fixed wait window for each url.
+ *
+ * note: we intentionally skip the initial samples taken during powermetrics
+ * startup and browser launch to reduce noise in per-site averages.
+ */
+function computePerSiteAverages(
+	allSamples: number[],
+	siteUrls: string[],
+): SiteAverage[] {
+	if (allSamples.length === 0) return [];
+	// samples gathered before first site (powermetrics startup + browser launch)
+	const preSiteSamples = Math.max(
+		0,
+		Math.round(
+			(POWERMETRICS_STARTUP_DELAY_MS + BROWSER_LAUNCH_DELAY_MS) /
+				sampleIntervalMs,
+		),
+	);
+	// number of samples we expect to collect during each site's dwell window
+	const perSiteSamples = Math.max(
+		1,
+		Math.round((waitTimeSeconds * 1000) / sampleIntervalMs),
+	);
+	const samples = allSamples.slice(preSiteSamples);
+	const results: SiteAverage[] = [];
+	for (let i = 0; i < siteUrls.length; i++) {
+		const start = i * perSiteSamples;
+		const end = start + perSiteSamples;
+		if (start >= samples.length) break;
+		const chunk = samples.slice(start, end);
+		if (chunk.length === 0) break;
+		const avg =
+			chunk.reduce((acc, n) => acc + n, 0) / Math.max(1, chunk.length);
+		const url = siteUrls[i] ?? `site-${i}`;
+		results.push({
+			index: i,
+			url,
+			avg,
+			count: chunk.length,
+		});
+	}
+	return results;
+}
+
+type SiteSamples = {
+	index: number;
+	url: string;
+	samples: number[];
+};
+
+/**
+ * returns arrays of raw samples for each site window, using the same segmentation
+ * logic as computePerSiteAverages. this categorizes raw samples per site.
+ */
+function computeSamplesPerSite(
+	allSamples: number[],
+	siteUrls: string[],
+): SiteSamples[] {
+	if (allSamples.length === 0) return [];
+	const preSiteSamples = Math.max(
+		0,
+		Math.round(
+			(POWERMETRICS_STARTUP_DELAY_MS + BROWSER_LAUNCH_DELAY_MS) /
+				sampleIntervalMs,
+		),
+	);
+	const perSiteSamples = Math.max(
+		1,
+		Math.round((waitTimeSeconds * 1000) / sampleIntervalMs),
+	);
+	const samples = allSamples.slice(preSiteSamples);
+	const results: SiteSamples[] = [];
+	for (let i = 0; i < siteUrls.length; i++) {
+		const start = i * perSiteSamples;
+		const end = start + perSiteSamples;
+		if (start >= samples.length) break;
+		const chunk = samples.slice(start, end);
+		if (chunk.length === 0) break;
+		const url = siteUrls[i] ?? `site-${i}`;
+		results.push({
+			index: i,
+			url,
+			samples: chunk,
+		});
+	}
+	return results;
 }
 
 /**
@@ -347,6 +476,17 @@ function logETC(startTime: number, currentStep: number, totalSteps: number) {
  * If any step fails for a browser, the test run aborts early.
  */
 async function preflightBrowsers(browserNames: string[]): Promise<void> {
+	// launch then quit all browsers
+	// for (const browser of browsers) {
+	// 	await launchBrowser(browser);
+	// }
+
+	// await promptYesNo("All browsers working? (y/n): ");
+
+	// for (const browser of browsers) {
+	// 	await quitBrowser(browser);
+	// }
+
 	console.log(
 		"\n[Preflight] Verifying browser control before starting tests...",
 	);
@@ -373,6 +513,7 @@ async function preflightBrowsers(browserNames: string[]): Promise<void> {
 		try {
 			// launch
 			await launchBrowser(browser);
+			if (browser === "ChatGPT Atlas") await Bun.sleep(3000);
 			await Bun.sleep(1000);
 
 			// ensure a window exists by opening a neutral page
@@ -393,8 +534,20 @@ async function preflightBrowsers(browserNames: string[]): Promise<void> {
 			}
 
 			// close the window we just opened
-			await closeWindows(browser);
-			await Bun.sleep(1000);
+			await closeTab(browser);
+
+			if (pauseDuringPreflight) {
+				const approved = await promptYesNo(
+					`[Preflight] Did ${browser} close the tab correctly? (y/n): `,
+				);
+				if (!approved) {
+					throw new Error(
+						`User did not approve that ${browser} closed the tab correctly.`,
+					);
+				}
+			} else {
+				await Bun.sleep(1000);
+			}
 
 			// quit the app
 			await quitBrowser(browser);
@@ -454,7 +607,29 @@ type BrowserRunResult = {
 	logFile: string;
 	errorLogFile: string;
 };
-const overallResults: BrowserRunResult[] = [];
+type BrowserReport = BrowserRunResult & {
+	averagePerSite: SiteAverage[];
+	rawSamples: number[];
+	rawSamplesPerSite: SiteSamples[];
+};
+const overallResults: BrowserReport[] = [];
+
+async function writeResultsReport(results: BrowserReport[]) {
+	const payload = {
+		generatedAt: new Date().toISOString(),
+		sampleIntervalMs,
+		waitTimeSeconds,
+		results,
+	};
+	try {
+		await Bun.write(RESULTS_FILE, JSON.stringify(payload, null, 2));
+		console.log(
+			`[Results] Saved cumulative report to ./${RESULTS_FILE} (${results.length} browsers)`,
+		);
+	} catch (err) {
+		console.error("[Error] Failed to write results.json:", err);
+	}
+}
 
 // --- Setup ---
 console.log("Setting up logs directory...");
@@ -484,8 +659,7 @@ console.log(
 );
 
 const startTime = Date.now();
-// initialize a fixed deadline based solely on planned sleeps for the entire run
-expectedCompletionTimestampMs = startTime + plannedTestMs;
+// defer etc initialization until after preflight; preflight timing is indeterminate
 latestCompletedStep = 0;
 latestTotalSteps = totalSteps;
 let currentStep = 0;
@@ -588,7 +762,7 @@ for (const browser of browsers) {
 
 			// 6. Close the window
 			console.log("[Test]   Closing window...");
-			await closeWindows(browser);
+			await closeTab(browser);
 		}
 
 		// 7. Quit the browser
@@ -608,6 +782,9 @@ for (const browser of browsers) {
 		console.log("[Results] Processing power log...");
 		const logContent = await Bun.file(logFile).text();
 		const { avg, max, count } = parsePowerLog(logContent);
+		const rawSamples = extractPowerSamples(logContent);
+		const averagePerSite = computePerSiteAverages(rawSamples, urls);
+		const rawSamplesPerSite = computeSamplesPerSite(rawSamples, urls);
 		const hasData = count > 0;
 		overallResults.push({
 			browser,
@@ -617,6 +794,9 @@ for (const browser of browsers) {
 			hasData,
 			logFile,
 			errorLogFile,
+			averagePerSite,
+			rawSamples,
+			rawSamplesPerSite,
 		});
 
 		if (hasData) {
@@ -632,6 +812,8 @@ for (const browser of browsers) {
 		// 10. Clean up log files
 		// We'll leave the log files in the logs/ directory for review
 		console.log("[Test] Log files are available in ./logs/");
+		// 11. Write cumulative results so far so partial runs are preserved
+		await writeResultsReport(overallResults);
 	}
 	browserIndex++;
 }
