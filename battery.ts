@@ -98,6 +98,7 @@ const BROWSER_LAUNCH_DELAY_MS = 5000;
 const WINDOW_CLOSE_DELAY_MS = 500;
 const BROWSER_QUIT_DELAY_MS = 2000;
 const POWERMETRICS_STOP_DELAY_MS = 500;
+const PREFLIGHT_COOLDOWN_SECONDS = 20;
 
 async function openUrlInBrowser(browser: string, url: string) {
 	await $`open -a "/Applications/${browser}.app" "${url}"`.quiet();
@@ -547,6 +548,8 @@ async function preflightBrowsers(browserNames: string[]): Promise<void> {
 	}
 
 	console.log("[Preflight] OK: all browsers passed control check");
+
+	await Bun.sleep(PREFLIGHT_COOLDOWN_SECONDS * 1000);
 }
 
 // --- realtime ETC support ---
