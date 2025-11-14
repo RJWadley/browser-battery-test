@@ -34,6 +34,8 @@ const browsers = [
 	// group 3
 	// comet
 	"Comet",
+	// nook
+	"Nook",
 
 	// group 4
 	// Vivaldi
@@ -92,16 +94,23 @@ const urls = [
 	"https://docs.google.com/document/create",
 	"https://threejs.org/examples/#webgl_animation_keyframes",
 ];
-const waitTimeSeconds = 10;
+
+/**
+ * how long to wait on each page
+ */
+const waitTimeSeconds = 2;
+/**
+ * how often to sample power metrics
+ */
 const sampleIntervalMs = 500;
 
-// Estimated overheads in seconds for ETC calculation
-const ETC_DRIFT_WARNING_SECONDS = 3; // warn when recalculated deadline shifts by more than this
+// files and such
 const LOG_DIR = "logs";
 const RESULTS_FILE = "results.json";
-// ---
+const SCREENSHOTS_ROOT_DIR = "screenshots";
 
 // sleep delays (ms); centralize here to tune timings in one place
+const ETC_DRIFT_WARNING_SECONDS = 3; // warn when recalculated deadline shifts by more than this
 const BROWSER_LAUNCH_DELAY_MS = 5000;
 const WINDOW_CLOSE_DELAY_MS = 500;
 const BROWSER_QUIT_DELAY_MS = 2000;
@@ -148,6 +157,58 @@ async function quitBrowser(browser: string) {
 		.quiet()
 		.catch(() => {});
 	await $`killall "${browser}"`.quiet().catch(() => {});
+}
+
+function sanitizeForPath(value: string): string {
+	const trimmed = value.trim().toLowerCase();
+	if (!trimmed) return "unknown";
+	const cleaned = trimmed
+		.replace(/[^a-z0-9\-_.]+/g, "-")
+		.replace(/-+/g, "-")
+		.replace(/^-|-$/g, "");
+	return cleaned || "unknown";
+}
+
+async function captureScreenshot(options: {
+	browser: string;
+	url?: string;
+	phase?: string;
+}) {
+	const { browser, url, phase } = options;
+	const browserSlug = sanitizeForPath(browser);
+
+	let urlPart = "unknown";
+	if (url) {
+		const withoutProtocol = url.replace(/^https?:\/\//i, "");
+		const host = withoutProtocol.split("/")[0] ?? "";
+		urlPart = sanitizeForPath(host || withoutProtocol);
+	}
+
+	const browserDir = `${SCREENSHOTS_ROOT_DIR}/${browserSlug}`;
+	let fileName: string;
+	if (urlPart !== "unknown") {
+		// normal case: use the host as the filename so it's easy to scan
+		fileName = `${urlPart}.png`;
+	} else if (phase) {
+		// preflight / misc captures without a url fall back to the phase label
+		fileName = `${sanitizeForPath(phase)}.png`;
+	} else {
+		fileName = "screenshot.png";
+	}
+	const filePath = `${browserDir}/${fileName}`;
+
+	try {
+		await $`mkdir -p ${browserDir}`.quiet();
+		await $`screencapture -x ${filePath}`.quiet();
+		console.log(
+			`[Monitor] Saved screenshot for ${browser} (${url ?? "no url"}) to ${filePath}`,
+		);
+	} catch (err) {
+		console.error(
+			`[Error] Failed to capture screenshot for ${browser} (${url ?? "no url"}):`,
+			err,
+		);
+	}
 }
 
 /**
@@ -547,6 +608,17 @@ console.log("Setting up logs directory...");
 await $`rm -rf ${LOG_DIR}`.quiet();
 await $`mkdir -p ${LOG_DIR}`.quiet();
 console.log(`Logs will be stored in ./${LOG_DIR}`);
+console.log(
+	`Screenshots will be stored in ./${SCREENSHOTS_ROOT_DIR}/{browser}/`,
+);
+
+console.log(
+	"[Preflight] Taking a test screenshot to confirm screen capture permissions...",
+);
+await captureScreenshot({
+	browser: "preflight",
+	phase: "permission-check",
+});
 
 // --- ETC Calculation (exact, from explicit sleeps) ---
 const totalSteps = browsers.length * urls.length;
@@ -660,6 +732,11 @@ for (const browser of browsers) {
 			console.log(`[Monitor]  Waiting ${waitTimeSeconds} seconds...`);
 			await Bun.sleep(waitTimeSeconds * 1000);
 
+			await captureScreenshot({
+				browser,
+				url,
+				phase: "before-close-tab",
+			});
 			console.log("[Test]   Closing window...");
 			await closeTab(browser);
 			await Bun.sleep(WINDOW_CLOSE_DELAY_MS);
