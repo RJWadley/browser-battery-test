@@ -476,17 +476,6 @@ function logETC(startTime: number, currentStep: number, totalSteps: number) {
  * If any step fails for a browser, the test run aborts early.
  */
 async function preflightBrowsers(browserNames: string[]): Promise<void> {
-	// launch then quit all browsers
-	// for (const browser of browsers) {
-	// 	await launchBrowser(browser);
-	// }
-
-	// await promptYesNo("All browsers working? (y/n): ");
-
-	// for (const browser of browsers) {
-	// 	await quitBrowser(browser);
-	// }
-
 	console.log(
 		"\n[Preflight] Verifying browser control before starting tests...",
 	);
@@ -508,67 +497,56 @@ async function preflightBrowsers(browserNames: string[]): Promise<void> {
 			: "[Preflight] Manual confirmation disabled; proceeding with brief waits.",
 	);
 
+	// launch
 	for (const browser of browserNames) {
-		console.log(`[Preflight] Testing control for: ${browser}`);
-		try {
-			// launch
-			await launchBrowser(browser);
-			if (browser === "ChatGPT Atlas") await Bun.sleep(3000);
-			await Bun.sleep(1000);
+		await launchBrowser(browser);
+		if (browser === "ChatGPT Atlas") await Bun.sleep(3000);
+	}
+	await Bun.sleep(1000);
+	for (const browser of browserNames) {
+		await openUrlInBrowser(browser, exampleUrl);
+	}
 
-			// ensure a window exists by opening a neutral page
-			await openUrlInBrowser(browser, exampleUrl);
-
-			// prompt user to confirm the correct URL opened
-			if (pauseDuringPreflight) {
-				const approved = await promptYesNo(
-					`[Preflight] Did ${browser} open ${exampleUrl} correctly? (y/n): `,
-				);
-				if (!approved) {
-					throw new Error(
-						`User did not approve that ${browser} opened ${exampleUrl} correctly.`,
-					);
-				}
-			} else {
-				await Bun.sleep(2000);
+	// prompt user to confirm the correct URL opened
+	if (pauseDuringPreflight) {
+		const approved = await promptYesNo(
+			`[Preflight] Did all browsers open ${exampleUrl} correctly? (y/n): `,
+		);
+		if (!approved) {
+			for (const browser of browserNames) {
+				await quitBrowser(browser);
 			}
-
-			// close the window we just opened
-			await closeTab(browser);
-
-			if (pauseDuringPreflight) {
-				const approved = await promptYesNo(
-					`[Preflight] Did ${browser} close the tab correctly? (y/n): `,
-				);
-				if (!approved) {
-					throw new Error(
-						`User did not approve that ${browser} closed the tab correctly.`,
-					);
-				}
-			} else {
-				await Bun.sleep(1000);
-			}
-
-			// quit the app
-			await quitBrowser(browser);
-
-			console.log(`[Preflight] OK: ${browser}`);
-		} catch (err) {
-			console.error(`[Preflight] FAILED for ${browser}.`, err);
 			throw new Error(
-				`Preflight failed for ${browser}. Resolve control issues (Automation/AppleScript permissions) and retry.`,
+				`User did not approve that all browsers opened ${exampleUrl} correctly.`,
 			);
 		}
 	}
 
-	const continuePreflight = await promptYesNo(
-		"[Preflight] Preflight passed. Continue? (y/n): ",
-	);
-	if (!continuePreflight) {
-		throw new Error("User did not approve to continue.");
+	for (const browser of browserNames) {
+		// close the window we just opened
+		await closeTab(browser);
 	}
 
-	console.log("[Preflight] All browsers passed control check.\n");
+	if (pauseDuringPreflight) {
+		const approved = await promptYesNo(
+			"[Preflight] Did all browsers close the tab correctly? (y/n): ",
+		);
+		if (!approved) {
+			for (const browser of browserNames) {
+				await quitBrowser(browser);
+			}
+			throw new Error(
+				"User did not approve that all browsers closed the tab correctly.",
+			);
+		}
+	}
+
+	for (const browser of browserNames) {
+		// quit the app
+		await quitBrowser(browser);
+	}
+
+	console.log("[Preflight] OK: all browsers passed control check");
 }
 
 // --- realtime ETC support ---
