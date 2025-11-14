@@ -102,17 +102,6 @@ const PREFLIGHT_COOLDOWN_SECONDS = 20;
 
 async function openUrlInBrowser(browser: string, url: string) {
 	await $`open -a "/Applications/${browser}.app" "${url}"`.quiet();
-
-	if (browser === "Arc") {
-		await osaInBrowser(
-			browser,
-			`tell application "System Events" to keystroke "t" using {command down}`,
-		);
-		await osaInBrowser(
-			browser,
-			`tell application "System Events" to key code 53`,
-		);
-	}
 }
 
 async function osaInBrowser(browser: string, script: string) {
@@ -132,6 +121,16 @@ async function closeTab(browser: string) {
 
 async function launchBrowser(browser: string) {
 	await $`open -a "/Applications/${browser}.app"`;
+	if (browser === "Arc") {
+		await osaInBrowser(
+			browser,
+			`tell application "System Events" to keystroke "t" using {command down}`,
+		);
+		await osaInBrowser(
+			browser,
+			`tell application "System Events" to key code 53`,
+		);
+	}
 }
 
 async function quitBrowser(browser: string) {
