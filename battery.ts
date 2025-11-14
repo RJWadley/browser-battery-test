@@ -1,0 +1,559 @@
+#!/usr/bin/env bun
+import { $ } from "bun";
+import { generate as generateRandomWords } from "random-words";
+import { createInterface } from "node:readline";
+
+// --- Configuration ---
+const browsers = ["Google Chrome", "Firefox", "Safari"];
+const urls = [
+	"https://www.google.com",
+	"https://www.youtube.com",
+	"https://bun.sh",
+];
+const waitTimeSeconds = 5;
+const sampleIntervalMs = 1000;
+
+// Estimated overheads in seconds for ETC calculation
+const ETC_DRIFT_WARNING_SECONDS = 3; // warn when recalculated deadline shifts by more than this
+const LOG_DIR = "logs";
+// ---
+
+// sleep delays (ms); centralize here to tune timings in one place
+const POWERMETRICS_STARTUP_DELAY_MS = 2000;
+const BROWSER_LAUNCH_DELAY_MS = 5000;
+const WINDOW_CLOSE_DELAY_MS = 500;
+const BROWSER_QUIT_DELAY_MS = 2000;
+const POWERMETRICS_STOP_DELAY_MS = 500;
+
+/**
+ * Parses the verbose output of powermetrics to find Combined Power readings.
+ * This is specific to Apple Silicon.
+ */
+function parsePowerLog(log: string): {
+	avg: number;
+	max: number;
+	count: number;
+} {
+	const readings: number[] = [];
+	// Regex to find "Combined Power (CPU + GPU + ANE): XXXX mW"
+	const regex = /Combined Power \(CPU \+ GPU \+ ANE\): (\d+) mW/g;
+	let match: RegExpExecArray | null = regex.exec(log);
+	while (match !== null) {
+		const capturedMilliwatts = match[1];
+		if (typeof capturedMilliwatts === "string") {
+			readings.push(Number.parseInt(capturedMilliwatts, 10));
+		}
+		match = regex.exec(log);
+	}
+
+	if (readings.length === 0) {
+		return { avg: 0, max: 0, count: 0 };
+	}
+
+	const sum = readings.reduce((a, b) => a + b, 0);
+	const avg = sum / readings.length;
+	const max = Math.max(...readings);
+
+	return { avg, max, count: readings.length };
+}
+
+/**
+ * Formats a duration in seconds into a human-readable string.
+ */
+function formatSeconds(totalSeconds: number): string {
+	const minutes = Math.floor(totalSeconds / 60);
+	const seconds = Math.floor(totalSeconds % 60);
+	return `${minutes}m ${seconds}s`;
+}
+
+/**
+ * live status line (single-line, non-persistent) utilities.
+ * we keep one status line rendered at the bottom of the console and
+ * re-draw it in place so it doesn't spam logs. falls back to normal logs
+ * when not attached to a tty (e.g. redirected to file).
+ */
+// ansi color helpers; colorize tagged logs when running in a tty
+const ANSI = {
+	reset: "\x1b[0m",
+	bold: "\x1b[1m",
+	dim: "\x1b[2m",
+	red: "\x1b[31m",
+	green: "\x1b[32m",
+	yellow: "\x1b[33m",
+	blue: "\x1b[34m",
+	magenta: "\x1b[35m",
+	cyan: "\x1b[36m",
+	gray: "\x1b[90m",
+} as const;
+
+function colorizeTaggedText(text: string, { isError = false } = {}): string {
+	// only colorize well-known tags; keep everything else as-is
+	let colored = text;
+	colored = colored.replaceAll(
+		"[Preflight]",
+		`${ANSI.bold}${ANSI.cyan}[Preflight]${ANSI.reset}`,
+	);
+	colored = colored.replaceAll(
+		"[Monitor]",
+		`${ANSI.bold}${ANSI.blue}[Monitor]${ANSI.reset}`,
+	);
+	colored = colored.replaceAll(
+		"[Test]",
+		`${ANSI.bold}${ANSI.magenta}[Test]${ANSI.reset}`,
+	);
+	colored = colored.replaceAll(
+		"[Results]",
+		`${ANSI.bold}${ANSI.green}[Results]${ANSI.reset}`,
+	);
+	colored = colored.replaceAll(
+		"[Error]",
+		`${ANSI.bold}${ANSI.red}[Error]${ANSI.reset}`,
+	);
+	// emphasize generic thrown errors when no tag is present
+	if (isError && colored === text) {
+		colored = `${ANSI.red}${text}${ANSI.reset}`;
+	}
+	return colored;
+}
+
+const isInteractiveTerminal =
+	typeof process !== "undefined" &&
+	typeof process.stdout !== "undefined" &&
+	(Boolean as unknown as (v: unknown) => boolean)(process.stdout.isTTY);
+let liveStatusText = "";
+let liveStatusActive = false;
+const originalConsoleLog: typeof console.log = console.log.bind(console);
+const originalConsoleError: typeof console.error = console.error.bind(console);
+
+function writeAndRenderLiveStatus() {
+	if (!isInteractiveTerminal || !liveStatusActive) return;
+	// clear current line, carriage return, then write status
+	const line = colorizeTaggedText(liveStatusText);
+	process.stdout.write(`\x1b[2K\r${line}`);
+}
+
+function clearLiveStatusLine() {
+	if (!isInteractiveTerminal) return;
+	process.stdout.write("\x1b[2K\r");
+}
+
+function setLiveStatus(text: string) {
+	if (!isInteractiveTerminal) {
+		// not a tty; emit a normal log so information isn't lost
+		originalConsoleLog(text);
+		return;
+	}
+	liveStatusText = text;
+	liveStatusActive = true;
+	writeAndRenderLiveStatus();
+}
+
+function stopLiveStatus() {
+	liveStatusActive = false;
+	clearLiveStatusLine();
+	stopRealtimeETC();
+}
+
+async function promptYesNo(question: string): Promise<boolean> {
+	if (!isInteractiveTerminal) {
+		// not interactive; assume 'yes' so CI/logged runs don't hang
+		originalConsoleLog(`${question} (non-interactive: assuming 'y')`);
+		return true;
+	}
+	const rl = createInterface({
+		input: process.stdin,
+		output: process.stdout,
+	});
+	const interactiveQuestion =
+		typeof question === "string" ? colorizeTaggedText(question) : question;
+	const answer: string = await new Promise((resolve) =>
+		rl.question(interactiveQuestion, (ans: string) => resolve(ans)),
+	);
+	rl.close();
+	const normalized = answer.trim().toLowerCase();
+	return normalized === "y" || normalized === "yes";
+}
+
+// wrap console methods so the live status stays at the bottom while printing
+console.log = ((...args: unknown[]) => {
+	if (isInteractiveTerminal && liveStatusActive) clearLiveStatusLine();
+	const finalArgs = isInteractiveTerminal
+		? args.map((a) => (typeof a === "string" ? colorizeTaggedText(a) : a))
+		: args;
+	// @ts-ignore bun's console types are compatible
+	originalConsoleLog(...finalArgs);
+	if (liveStatusActive) writeAndRenderLiveStatus();
+}) as typeof console.log;
+
+console.error = ((...args: unknown[]) => {
+	if (isInteractiveTerminal && liveStatusActive) clearLiveStatusLine();
+	const finalArgs = isInteractiveTerminal
+		? args.map((a) =>
+				typeof a === "string" ? colorizeTaggedText(a, { isError: true }) : a,
+			)
+		: args;
+	// @ts-ignore bun's console types are compatible
+	originalConsoleError(...finalArgs);
+	if (liveStatusActive) writeAndRenderLiveStatus();
+}) as typeof console.error;
+
+// ensure we don't leave the status line hanging on exit/ctrl-c
+if (typeof process !== "undefined") {
+	process.on("exit", () => {
+		stopLiveStatus();
+	});
+	process.on("SIGINT", () => {
+		stopLiveStatus();
+		process.exit(130);
+	});
+}
+
+/**
+ * updates the live status with estimated time remaining.
+ */
+function logETC(startTime: number, currentStep: number, totalSteps: number) {
+	if (currentStep <= 0) return;
+	const elapsedTimeMs = Date.now() - startTime;
+	const timePerStepMs = elapsedTimeMs / currentStep;
+	const remainingSteps = totalSteps - currentStep;
+	const remainingTimeMs = remainingSteps * timePerStepMs;
+
+	// if we don't already have a fixed deadline, initialize it once from current pace
+	if (expectedCompletionTimestampMs == null) {
+		expectedCompletionTimestampMs = Date.now() + remainingTimeMs;
+	}
+	latestCompletedStep = currentStep;
+	latestTotalSteps = totalSteps;
+
+	// draw once immediately, then keep updating every second until we stop
+	const displayRemainingMs = Math.max(
+		0,
+		(expectedCompletionTimestampMs ?? Date.now()) - Date.now(),
+	);
+	setLiveStatus(
+		`[Monitor]  Step ${latestCompletedStep}/${latestTotalSteps} complete. ETC: ${formatSeconds(
+			displayRemainingMs / 1000,
+		)}`,
+	);
+	ensureRealtimeETC();
+}
+
+/**
+ * Quickly verifies we can control each browser by launching it,
+ * opening a simple page, closing the front window, and quitting.
+ * If any step fails for a browser, the test run aborts early.
+ */
+async function preflightBrowsers(browserNames: string[]): Promise<void> {
+	console.log(
+		"\n[Preflight] Verifying browser control before starting tests...",
+	);
+	// generate a short phrase and use it in the URL path to avoid cache hits from previous runs
+	const randomWords = generateRandomWords(5);
+	const phrase = (
+		Array.isArray(randomWords) ? randomWords : [randomWords]
+	).join("-");
+	const exampleUrl = `https://example.com/${phrase}`;
+	console.log(`[Preflight] Using unique URL: ${exampleUrl}`);
+
+	for (const browser of browserNames) {
+		console.log(`[Preflight] Testing control for: ${browser}`);
+		try {
+			// launch
+			await $`open -a "${browser}"`.quiet();
+
+			// ensure a window exists by opening a neutral page
+			await $`open -a "${browser}" "${exampleUrl}"`.quiet();
+
+			// prompt user to confirm the correct URL opened
+			const approved = await promptYesNo(
+				`[Preflight] Did ${browser} open ${exampleUrl} correctly? (y/n): `,
+			);
+			if (!approved) {
+				throw new Error(
+					`User did not approve that ${browser} opened ${exampleUrl} correctly.`,
+				);
+			}
+
+			// close the window we just opened
+			await $`osascript -e 'tell application "${browser}" to close first window'`.quiet();
+
+			// quit the app
+			await $`osascript -e 'tell application "${browser}" to quit'`.quiet();
+
+			console.log(`[Preflight] OK: ${browser}`);
+		} catch (err) {
+			console.error(`[Preflight] FAILED for ${browser}.`, err);
+			throw new Error(
+				`Preflight failed for ${browser}. Resolve control issues (Automation/AppleScript permissions) and retry.`,
+			);
+		}
+	}
+
+	const continuePreflight = await promptYesNo(
+		"[Preflight] Preflight passed. Continue? (y/n): ",
+	);
+	if (!continuePreflight) {
+		throw new Error("User did not approve to continue.");
+	}
+
+	console.log("[Preflight] All browsers passed control check.\n");
+}
+
+// --- realtime ETC support ---
+let etcIntervalId: ReturnType<typeof setInterval> | null = null;
+let expectedCompletionTimestampMs: number | null = null;
+let latestCompletedStep = 0;
+let latestTotalSteps = 0;
+
+function stopRealtimeETC() {
+	if (etcIntervalId) {
+		clearInterval(etcIntervalId);
+		etcIntervalId = null;
+	}
+	expectedCompletionTimestampMs = null;
+}
+
+function ensureRealtimeETC() {
+	if (etcIntervalId) return;
+	etcIntervalId = setInterval(() => {
+		if (!liveStatusActive || expectedCompletionTimestampMs == null) return;
+		const remainingMs = Math.max(0, expectedCompletionTimestampMs - Date.now());
+		liveStatusText = `[Monitor]  Step ${latestCompletedStep}/${latestTotalSteps} complete. ETC: ${formatSeconds(
+			remainingMs / 1000,
+		)}`;
+		writeAndRenderLiveStatus();
+	}, 1000);
+}
+
+// --- results aggregation ---
+type BrowserRunResult = {
+	browser: string;
+	avg: number;
+	max: number;
+	count: number;
+	hasData: boolean;
+	logFile: string;
+	errorLogFile: string;
+};
+const overallResults: BrowserRunResult[] = [];
+
+// --- Setup ---
+console.log("Setting up logs directory...");
+await $`rm -rf ${LOG_DIR}`.quiet();
+await $`mkdir -p ${LOG_DIR}`.quiet();
+console.log(`Logs will be stored in ./${LOG_DIR}`);
+
+// --- ETC Calculation (exact, from explicit sleeps) ---
+const totalSteps = browsers.length * urls.length;
+// per test (per browser):
+// - wait after powermetrics start
+// - wait after browser launch
+// - per URL: waitTimeSeconds + close window
+// - quit browser
+// - wait after powermetrics stop
+const TEST_SLEEP_PER_BROWSER_MS =
+	POWERMETRICS_STARTUP_DELAY_MS +
+	BROWSER_LAUNCH_DELAY_MS +
+	urls.length * (waitTimeSeconds * 1000 + WINDOW_CLOSE_DELAY_MS) +
+	BROWSER_QUIT_DELAY_MS +
+	POWERMETRICS_STOP_DELAY_MS;
+const plannedTestMs = browsers.length * TEST_SLEEP_PER_BROWSER_MS;
+console.log(
+	`[Monitor] Planned sleeps - total: ${formatSeconds(
+		plannedTestMs / 1000,
+	)}. Total steps: ${totalSteps}`,
+);
+
+const startTime = Date.now();
+// initialize a fixed deadline based solely on planned sleeps for the entire run
+expectedCompletionTimestampMs = startTime + plannedTestMs;
+latestCompletedStep = 0;
+latestTotalSteps = totalSteps;
+let currentStep = 0;
+
+// $`&` is used to suppress output from 'which' command
+// We're checking if the 'sudo' command is available (it always should be)
+// and this serves as a way to trigger the sudo password prompt *once*
+// at the beginning, rather than during the script.
+console.log(
+	"Checking for sudo access... You may be prompted for your password.",
+);
+try {
+	await $`sudo -v`.quiet();
+	console.log("Sudo access confirmed.");
+} catch (e) {
+	throw new Error("Failed to get sudo access. Exiting.");
+}
+
+// --- Preflight: open and close all browsers to confirm control ---
+await preflightBrowsers(browsers);
+
+let browserIndex = 0;
+for (const browser of browsers) {
+	console.log(`\n--- Starting Test for: ${browser} ---`);
+
+	// at the beginning of the test, recalibrate deadline from remaining planned sleeps
+	const remainingBrowsersIncludingCurrent = browsers.length - browserIndex;
+	const recalculatedRemainingMs =
+		remainingBrowsersIncludingCurrent * TEST_SLEEP_PER_BROWSER_MS;
+	const recalculatedDeadline = Date.now() + recalculatedRemainingMs;
+	if (expectedCompletionTimestampMs != null) {
+		const deltaMs = recalculatedDeadline - expectedCompletionTimestampMs;
+		if (Math.abs(deltaMs) > ETC_DRIFT_WARNING_SECONDS * 1000) {
+			console.log(
+				`[Monitor] Warning: ETC drift ${deltaMs > 0 ? "+" : ""}${Math.round(deltaMs / 1000)}s vs previous estimate. Recalibrating.`,
+			);
+		}
+	}
+	expectedCompletionTimestampMs = recalculatedDeadline;
+	latestTotalSteps = totalSteps;
+	latestCompletedStep = currentStep;
+	const initialRemainingMs = Math.max(
+		0,
+		(expectedCompletionTimestampMs ?? Date.now()) - Date.now(),
+	);
+	setLiveStatus(
+		`[Monitor]  Step ${latestCompletedStep}/${latestTotalSteps} complete. ETC: ${formatSeconds(
+			initialRemainingMs / 1000,
+		)}`,
+	);
+	ensureRealtimeETC();
+
+	const logFile = `${LOG_DIR}/power_log_${browser.replace(/\s+/g, "_")}.txt`;
+	const errorLogFile = `${LOG_DIR}/power_error_${browser.replace(
+		/\s+/g,
+		"_",
+	)}.txt`;
+
+	// 1. Start monitoring power consumption in the background
+	console.log(`[Monitor] Starting powermetrics (logging to ${logFile})...`);
+	const powerMonitor = Bun.spawn(
+		[
+			"sudo",
+			"powermetrics",
+			"--samplers",
+			"cpu_power",
+			"-i",
+			`${sampleIntervalMs}`,
+		],
+		{
+			stdout: Bun.file(logFile),
+			stderr: Bun.file(errorLogFile),
+		},
+	);
+	console.log(`[Monitor] Started (PID: ${powerMonitor.pid})`);
+
+	try {
+		// Give powermetrics a moment to start
+		await Bun.sleep(POWERMETRICS_STARTUP_DELAY_MS);
+
+		// 2. Launch the browser
+		console.log(`[Test] Launching ${browser}...`);
+		await $`open -a "${browser}"`.quiet();
+		await Bun.sleep(BROWSER_LAUNCH_DELAY_MS); // wait for the browser to launch
+
+		// 3. Loop through URLs
+		for (const url of urls) {
+			console.log(`[Test]   Opening ${url}...`);
+
+			// 4. Open the URL
+			await $`open -a "${browser}" "${url}"`.quiet();
+
+			// 5. Monitor for one minute
+			console.log(`[Monitor]  Waiting ${waitTimeSeconds} seconds...`);
+			await Bun.sleep(waitTimeSeconds * 1000);
+
+			// Update ETC
+			currentStep++;
+			logETC(startTime, currentStep, totalSteps);
+
+			// 6. Close the window
+			console.log("[Test]   Closing window...");
+			// Use AppleScript to close the *front* window (the tab we opened)
+			await $`osascript -e 'tell application "${browser}" to close first window'`.quiet();
+			await Bun.sleep(WINDOW_CLOSE_DELAY_MS); // wait for window to close
+		}
+
+		// 7. Quit the browser
+		console.log(`[Test] Quitting ${browser}...`);
+		await $`osascript -e 'tell application "${browser}" to quit'`.quiet();
+		await Bun.sleep(BROWSER_QUIT_DELAY_MS); // wait for it to fully quit
+	} catch (error) {
+		console.error(`[Error] Test failed for ${browser}:`, error);
+	} finally {
+		// 8. Stop monitoring (ALWAYS run this)
+		console.log("[Monitor] Stopping powermetrics...");
+		powerMonitor.kill();
+		await Bun.sleep(POWERMETRICS_STOP_DELAY_MS); // give it a moment to stop
+		console.log("[Monitor] Stopped.");
+
+		// 9. Process results
+		console.log("[Results] Processing power log...");
+		const logContent = await Bun.file(logFile).text();
+		const { avg, max, count } = parsePowerLog(logContent);
+		const hasData = count > 0;
+		overallResults.push({
+			browser,
+			avg,
+			max,
+			count,
+			hasData,
+			logFile,
+			errorLogFile,
+		});
+
+		if (hasData) {
+			console.log(`[Results] --- ${browser} ---`);
+			console.log(`[Results] Average Power: ${avg.toFixed(2)} mW`);
+			console.log(`[Results] Max Power: ${max} mW`);
+			console.log(`[Results] Samples Taken: ${count}`);
+		} else {
+			console.log(`[Results] No power data captured for ${browser}.`);
+			console.log(`[Results] Check ${errorLogFile} for errors.`);
+		}
+
+		// 10. Clean up log files
+		// We'll leave the log files in the logs/ directory for review
+		console.log("[Test] Log files are available in ./logs/");
+	}
+	browserIndex++;
+}
+
+const endTime = Date.now();
+stopLiveStatus();
+console.log("\n--- All Tests Finished ---");
+console.log(`Total time taken: ${formatSeconds((endTime - startTime) / 1000)}`);
+
+// overall summary across browsers
+if (overallResults.length > 0) {
+	console.log("\n[Results] Overall summary:");
+	const successful = overallResults.filter((r) => r.hasData);
+	const missing = overallResults.filter((r) => !r.hasData);
+
+	if (successful.length > 0) {
+		// sort by avg ascending (lower is better)
+		successful.sort((a, b) => a.avg - b.avg);
+		const namePad = Math.max(
+			"Browser".length,
+			...successful.map((r) => r.browser.length),
+		);
+		console.log(
+			`[Results] ${"Browser".padEnd(namePad)}  ${"Avg (mW)".padStart(9)}  ${"Max (mW)".padStart(9)}  ${"Samples".padStart(8)}`,
+		);
+		for (const r of successful) {
+			console.log(
+				`[Results] ${r.browser.padEnd(namePad)}  ${r.avg.toFixed(2).padStart(9)}  ${String(r.max).padStart(9)}  ${String(r.count).padStart(8)}`,
+			);
+		}
+		const best = successful.reduce((min, r) => (r.avg < min.avg ? r : min));
+		console.log(
+			`[Results] Best (lowest avg power): ${best.browser} (${best.avg.toFixed(2)} mW)`,
+		);
+	}
+
+	for (const r of missing) {
+		console.log(
+			`[Results] ${r.browser}: no power data captured (see ${r.errorLogFile})`,
+		);
+	}
+}

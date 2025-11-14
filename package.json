@@ -1,0 +1,13 @@
+{
+  "name": "browser-battery-test",
+  "private": true,
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "random-words": "^2.0.1"
+  }
+}
