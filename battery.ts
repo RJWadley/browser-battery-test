@@ -34,8 +34,6 @@ const browsers = [
 	// group 3
 	// comet
 	"Comet",
-	// nook
-	"Nook",
 
 	// group 4
 	// Vivaldi
@@ -56,6 +54,8 @@ const browsers = [
 	"Firefox",
 	// ladybird (future)
 	// "Ladybird",
+	// // nook (future)
+	// "Nook",
 ];
 
 const urls = [
