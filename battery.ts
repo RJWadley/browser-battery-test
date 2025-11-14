@@ -4,11 +4,78 @@ import { generate as generateRandomWords } from "random-words";
 import { createInterface } from "node:readline";
 
 // --- Configuration ---
-const browsers = ["Google Chrome", "Firefox", "Safari"];
+const browsers = [
+	// Chrome
+	"Google Chrome",
+	// Edge
+	"Microsoft Edge",
+	// Arc
+	"Arc",
+	// Helium
+	"Helium",
+	// Zen
+	"Zen",
+
+	// comet
+	"Comet",
+	// ChatGPT Atlas
+	"ChatGPT Atlas",
+
+	// Vivaldi
+	"Vivaldi",
+	// Opera
+	"Opera",
+	// Safari
+	"Safari",
+	// Orion
+	"Orion",
+
+	// Not even worth considering
+	// Brave
+	"Brave Browser",
+	// sigmaOS
+	"SigmaOS",
+	// firefox
+	"Firefox",
+	// ladybird (future)
+	// "Ladybird",
+	// dia
+	"Dia",
+	// deta surf
+	"Surf",
+];
+
 const urls = [
-	"https://www.google.com",
-	"https://www.youtube.com",
-	"https://bun.sh",
+	// social sites
+	"https://x.com/taylorswift13",
+	"https://www.reddit.com/r/popular/",
+	"https://www.instagram.com/dropouttv/",
+	"https://www.linkedin.com/company/meta/",
+	"https://www.pinterest.com/",
+	// streaming sites
+	"https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+	"https://www.twitch.tv/",
+	"https://vimeo.com/1084537?autoplay=true",
+	"https://open.spotify.com/browse",
+	"https://www.tiktok.com/foryou",
+	// news sites
+	"https://www.cnn.com/",
+	"https://www.theverge.com/",
+	"https://www.dailymail.co.uk/",
+	"https://www.espn.com/",
+	"https://www.weather.com/",
+	// shopping sites
+	"https://www.amazon.com/",
+	"https://www.google.com/maps",
+	"https://www.airbnb.com/",
+	"https://www.apple.com/iphone/",
+	"https://www.ebay.com/",
+	// other sites
+	"https://en.wikipedia.org/wiki/Main_Page",
+	"https://github.com/torvalds/linux",
+	"https://stackoverflow.com/questions",
+	"https://docs.google.com/document/create",
+	"https://threejs.org/examples/#webgl_animation_keyframes",
 ];
 const waitTimeSeconds = 5;
 const sampleIntervalMs = 1000;
@@ -24,6 +91,42 @@ const BROWSER_LAUNCH_DELAY_MS = 5000;
 const WINDOW_CLOSE_DELAY_MS = 500;
 const BROWSER_QUIT_DELAY_MS = 2000;
 const POWERMETRICS_STOP_DELAY_MS = 500;
+
+async function launchBrowser(browser: string) {
+	await $`open -na "/Applications/${browser}.app"`.quiet();
+	await closeWindows(browser);
+}
+
+async function openUrlInBrowser(browser: string, url: string) {
+	// const cfg = getBrowserControl(browser);
+	// if (cfg.openUrlMethod === "applescript-open-location") {
+	// 	// use AppleScript open location; works for many browsers that register URL handler
+	// 	await $`osascript -e 'tell application "${browser}" to activate'`.quiet();
+	// 	await $`osascript -e 'tell application "${browser}" to open location "${url}"'`.quiet();
+	// 	return;
+	// }
+	// // default: macOS 'open' targeting the application (or bundle id if provided)
+	// if (cfg.bundleId) {
+	// 	await $`open -b ${cfg.bundleId} ${url}`.quiet();
+	// } else {
+	await $`open -a "${browser}" "${url}"`.quiet();
+	// }
+}
+
+async function closeWindows(browser: string) {
+	await $`osascript -e 'tell application "${browser}" to close first window' || exit 0`.quiet();
+	await $`osascript -e 'tell application "${browser}" to close first window' || exit 0`.quiet();
+	await $`osascript -e 'tell application "${browser}" to close first window' || exit 0`.quiet();
+	await $`osascript -e 'tell application "${browser}" to close first window' || exit 0`.quiet();
+}
+
+async function quitBrowser(browser: string) {
+	if (browser === "ChatGPT Atlas" || browser === "Dia") {
+		await $`killall "${browser}"`.quiet();
+	} else {
+		await $`osascript -e 'tell application "${browser}" to quit'`.quiet();
+	}
+}
 
 /**
  * Parses the verbose output of powermetrics to find Combined Power readings.
@@ -252,33 +355,49 @@ async function preflightBrowsers(browserNames: string[]): Promise<void> {
 	const phrase = (
 		Array.isArray(randomWords) ? randomWords : [randomWords]
 	).join("-");
-	const exampleUrl = `https://example.com/${phrase}`;
+	const exampleUrl = `https://google.com/?q=${phrase}`;
 	console.log(`[Preflight] Using unique URL: ${exampleUrl}`);
+
+	// ask once whether to pause for manual confirmation during preflight
+	const pauseDuringPreflight = await promptYesNo(
+		"[Preflight] Pause to confirm each browser opened the test URL? (y/n): ",
+	);
+	console.log(
+		pauseDuringPreflight
+			? "[Preflight] Manual confirmation enabled."
+			: "[Preflight] Manual confirmation disabled; proceeding with brief waits.",
+	);
 
 	for (const browser of browserNames) {
 		console.log(`[Preflight] Testing control for: ${browser}`);
 		try {
 			// launch
-			await $`open -a "${browser}"`.quiet();
+			await launchBrowser(browser);
+			await Bun.sleep(1000);
 
 			// ensure a window exists by opening a neutral page
-			await $`open -a "${browser}" "${exampleUrl}"`.quiet();
+			await openUrlInBrowser(browser, exampleUrl);
 
 			// prompt user to confirm the correct URL opened
-			const approved = await promptYesNo(
-				`[Preflight] Did ${browser} open ${exampleUrl} correctly? (y/n): `,
-			);
-			if (!approved) {
-				throw new Error(
-					`User did not approve that ${browser} opened ${exampleUrl} correctly.`,
+			if (pauseDuringPreflight) {
+				const approved = await promptYesNo(
+					`[Preflight] Did ${browser} open ${exampleUrl} correctly? (y/n): `,
 				);
+				if (!approved) {
+					throw new Error(
+						`User did not approve that ${browser} opened ${exampleUrl} correctly.`,
+					);
+				}
+			} else {
+				await Bun.sleep(2000);
 			}
 
 			// close the window we just opened
-			await $`osascript -e 'tell application "${browser}" to close first window'`.quiet();
+			await closeWindows(browser);
+			await Bun.sleep(1000);
 
 			// quit the app
-			await $`osascript -e 'tell application "${browser}" to quit'`.quiet();
+			await quitBrowser(browser);
 
 			console.log(`[Preflight] OK: ${browser}`);
 		} catch (err) {
@@ -449,7 +568,7 @@ for (const browser of browsers) {
 
 		// 2. Launch the browser
 		console.log(`[Test] Launching ${browser}...`);
-		await $`open -a "${browser}"`.quiet();
+		await launchBrowser(browser);
 		await Bun.sleep(BROWSER_LAUNCH_DELAY_MS); // wait for the browser to launch
 
 		// 3. Loop through URLs
@@ -457,7 +576,7 @@ for (const browser of browsers) {
 			console.log(`[Test]   Opening ${url}...`);
 
 			// 4. Open the URL
-			await $`open -a "${browser}" "${url}"`.quiet();
+			await openUrlInBrowser(browser, url);
 
 			// 5. Monitor for one minute
 			console.log(`[Monitor]  Waiting ${waitTimeSeconds} seconds...`);
@@ -469,14 +588,12 @@ for (const browser of browsers) {
 
 			// 6. Close the window
 			console.log("[Test]   Closing window...");
-			// Use AppleScript to close the *front* window (the tab we opened)
-			await $`osascript -e 'tell application "${browser}" to close first window'`.quiet();
-			await Bun.sleep(WINDOW_CLOSE_DELAY_MS); // wait for window to close
+			await closeWindows(browser);
 		}
 
 		// 7. Quit the browser
 		console.log(`[Test] Quitting ${browser}...`);
-		await $`osascript -e 'tell application "${browser}" to quit'`.quiet();
+		await quitBrowser(browser);
 		await Bun.sleep(BROWSER_QUIT_DELAY_MS); // wait for it to fully quit
 	} catch (error) {
 		console.error(`[Error] Test failed for ${browser}:`, error);
