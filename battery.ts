@@ -131,6 +131,7 @@ async function closeTab(browser: string) {
 async function launchBrowser(browser: string) {
 	await $`open -a "/Applications/${browser}.app"`;
 	if (browser === "Arc") {
+		// arc has a tendency to open the tab in the background without focusing it, this is a workaround
 		await osaInBrowser(
 			browser,
 			`tell application "System Events" to keystroke "t" using {command down}`,
@@ -143,11 +144,10 @@ async function launchBrowser(browser: string) {
 }
 
 async function quitBrowser(browser: string) {
-	if (browser === "ChatGPT Atlas" || browser === "Dia") {
-		await $`killall "${browser}"`.quiet();
-	} else {
-		await $`osascript -e 'tell application "${browser}" to quit'`.quiet();
-	}
+	await $`osascript -e 'tell application "${browser}" to quit'`
+		.quiet()
+		.catch(() => {});
+	await $`killall "${browser}"`.quiet().catch(() => {});
 }
 
 /**
