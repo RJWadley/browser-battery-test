@@ -67,7 +67,7 @@ const urls = [
 	"https://www.theverge.com/",
 	"https://www.dailymail.co.uk/",
 	"https://www.espn.com/",
-	"https://www.weather.com/",
+	"https://www.foxnews.com/",
 
 	// shopping sites
 	"https://www.amazon.com/",
@@ -517,6 +517,7 @@ async function preflightBrowsers(browserNames: string[]): Promise<void> {
 	await Bun.sleep(1000);
 	for (const browser of browserNames) {
 		await openUrlInBrowser(browser, exampleUrl);
+		await openUrlInBrowser(browser, "http://sample.local"); // for permissions
 	}
 
 	// prompt user to confirm the correct URL opened
@@ -551,6 +552,11 @@ async function preflightBrowsers(browserNames: string[]): Promise<void> {
 				"User did not approve that all browsers closed the tab correctly.",
 			);
 		}
+	}
+
+	for (const browser of browserNames) {
+		// close the window we just opened
+		await closeTab(browser);
 	}
 
 	for (const browser of browserNames) {
