@@ -132,10 +132,13 @@ async function osaInBrowser(browser: string, script: string) {
 }
 
 async function closeTab(browser: string, count: number) {
-	await osaInBrowser(
-		browser,
-		`repeat ${count} times tell application "System Events" to keystroke "w" using {command down}`,
-	);
+	// use a proper applescript repeat block so multiple cmd+w presses actually fire
+	const script = `
+repeat ${count} times
+	tell application "System Events" to keystroke "w" using {command down}
+end repeat
+`;
+	await osaInBrowser(browser, script.trim());
 }
 
 async function launchBrowser(browser: string) {
