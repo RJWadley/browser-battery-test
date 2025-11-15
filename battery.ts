@@ -184,7 +184,8 @@ async function captureScreenshot(options: {
 		urlPart = sanitizeForPath(host || withoutProtocol);
 	}
 
-	const browserDir = `${SCREENSHOTS_ROOT_DIR}/${browserSlug}`;
+	// organized-by-browser path
+	const browserDir = `${SCREENSHOTS_ROOT_DIR}/by-browser/${browserSlug}`;
 	let fileName: string;
 	if (urlPart !== "unknown") {
 		// normal case: use the host as the filename so it's easy to scan
@@ -195,13 +196,32 @@ async function captureScreenshot(options: {
 	} else {
 		fileName = "screenshot.png";
 	}
-	const filePath = `${browserDir}/${fileName}`;
+	const browserFilePath = `${browserDir}/${fileName}`;
+
+	// organized-by-site path (only when we have a host)
+	const siteSlug = urlPart !== "unknown" ? urlPart : null;
+	const siteDir =
+		siteSlug != null ? `${SCREENSHOTS_ROOT_DIR}/by-site/${siteSlug}` : null;
+	const siteFilePath = siteDir != null ? `${siteDir}/${browserSlug}.png` : null;
 
 	try {
 		await $`mkdir -p ${browserDir}`.quiet();
-		await $`screencapture -x ${filePath}`.quiet();
+		if (siteDir) {
+			await $`mkdir -p ${siteDir}`.quiet();
+		}
+
+		// capture once into the browser-organized path
+		await $`screencapture -x ${browserFilePath}`.quiet();
+
+		// and copy into the site-organized layout if applicable
+		if (siteFilePath) {
+			await $`cp ${browserFilePath} ${siteFilePath}`.quiet();
+		}
+
 		console.log(
-			`[Monitor] Saved screenshot for ${browser} (${url ?? "no url"}) to ${filePath}`,
+			`[Monitor] Saved screenshot for ${browser} (${url ?? "no url"}) to ${browserFilePath}${
+				siteFilePath ? ` and ${siteFilePath}` : ""
+			}`,
 		);
 	} catch (err) {
 		console.error(
@@ -209,57 +229,6 @@ async function captureScreenshot(options: {
 			err,
 		);
 	}
-}
-
-/**
- * Parses the verbose output of powermetrics to find Combined Power readings.
- * This is specific to Apple Silicon.
- */
-function parsePowerLog(log: string): {
-	avg: number;
-	max: number;
-	count: number;
-} {
-	const readings: number[] = [];
-	// Regex to find "Combined Power (CPU + GPU + ANE): XXXX mW"
-	const regex = /Combined Power \(CPU \+ GPU \+ ANE\): (\d+) mW/g;
-	let match: RegExpExecArray | null = regex.exec(log);
-	while (match !== null) {
-		const capturedMilliwatts = match[1];
-		if (typeof capturedMilliwatts === "string") {
-			readings.push(Number.parseInt(capturedMilliwatts, 10));
-		}
-		match = regex.exec(log);
-	}
-
-	if (readings.length === 0) {
-		return { avg: 0, max: 0, count: 0 };
-	}
-
-	const sum = readings.reduce((a, b) => a + b, 0);
-	const avg = sum / readings.length;
-	const max = Math.max(...readings);
-
-	return { avg, max, count: readings.length };
-}
-
-/**
- * returns all power samples discovered in the log as a time-ordered array.
- * we keep this separate from parsePowerLog() so we can store raw samples
- * for later analysis and derive per-site stats.
- */
-function extractPowerSamples(log: string): number[] {
-	const samples: number[] = [];
-	const regex = /Combined Power \(CPU \+ GPU \+ ANE\): (\d+) mW/g;
-	let match: RegExpExecArray | null = regex.exec(log);
-	while (match !== null) {
-		const capturedMilliwatts = match[1];
-		if (typeof capturedMilliwatts === "string") {
-			samples.push(Number.parseInt(capturedMilliwatts, 10));
-		}
-		match = regex.exec(log);
-	}
-	return samples;
 }
 
 type PageEnergy = {
@@ -494,6 +463,10 @@ async function preflightBrowsers(browserNames: string[]): Promise<void> {
 	}
 	await Bun.sleep(1000);
 	for (const browser of browserNames) {
+		for (const url of urls) {
+			await openUrlInBrowser(browser, url);
+		}
+
 		await openUrlInBrowser(browser, exampleUrl);
 	}
 
@@ -513,7 +486,10 @@ async function preflightBrowsers(browserNames: string[]): Promise<void> {
 	}
 
 	for (const browser of browserNames) {
-		// close the window we just opened
+		// close the windows we just opened
+		for (const _ of urls) {
+			await closeTab(browser);
+		}
 		await closeTab(browser);
 	}
 
@@ -529,11 +505,6 @@ async function preflightBrowsers(browserNames: string[]): Promise<void> {
 				"User did not approve that all browsers closed the tab correctly.",
 			);
 		}
-	}
-
-	for (const browser of browserNames) {
-		// close the window we just opened
-		await closeTab(browser);
 	}
 
 	for (const browser of browserNames) {
@@ -609,7 +580,7 @@ await $`rm -rf ${LOG_DIR}`.quiet();
 await $`mkdir -p ${LOG_DIR}`.quiet();
 console.log(`Logs will be stored in ./${LOG_DIR}`);
 console.log(
-	`Screenshots will be stored in ./${SCREENSHOTS_ROOT_DIR}/{browser}/`,
+	`Screenshots will be stored in ./${SCREENSHOTS_ROOT_DIR}/by-browser/{browser}/ and ./${SCREENSHOTS_ROOT_DIR}/by-site/{site}/`,
 );
 
 console.log(
