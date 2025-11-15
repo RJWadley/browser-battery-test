@@ -100,6 +100,10 @@ const urls = [
  */
 const waitTimeSeconds = 2;
 /**
+ * stress test: how often to open a new tab (seconds between tab opens)
+ */
+const stressTabIntervalSeconds = 1;
+/**
  * how often to sample power metrics
  */
 const sampleIntervalMs = 500;
@@ -117,6 +121,7 @@ const BROWSER_QUIT_DELAY_MS = 2000;
 const PREFLIGHT_COOLDOWN_SECONDS = 20;
 
 const POWER_SAMPLE_INTERVAL_MS = sampleIntervalMs;
+const STRESS_TAB_INTERVAL_MS = stressTabIntervalSeconds * 1000;
 
 async function openUrlInBrowser(browser: string, url: string) {
 	await $`open -a "/Applications/${browser}.app" "${url}"`.quiet();
@@ -126,14 +131,10 @@ async function osaInBrowser(browser: string, script: string) {
 	await $`open -a "/Applications/${browser}.app" && osascript -e '${script}'`.quiet();
 }
 
-async function closeTab(browser: string) {
+async function closeTab(browser: string, count: number) {
 	await osaInBrowser(
 		browser,
-		`tell application "System Events" to keystroke "w" using {command down}`,
-	);
-	await osaInBrowser(
-		browser,
-		`tell application "System Events" to keystroke "w" using {command down}`,
+		`repeat ${count} times tell application "System Events" to keystroke "w" using {command down}`,
 	);
 }
 
@@ -231,8 +232,53 @@ async function captureScreenshot(options: {
 	}
 }
 
+async function runStressTestForBrowser(
+	browser: string,
+): Promise<StressTestEnergy | null> {
+	console.log(
+		`[Monitor] Running stress test for ${browser}: opening ${urls.length} tabs every ${stressTabIntervalSeconds}s...`,
+	);
+
+	const tracker = startTrackingEnergy({
+		sampleIntervalMs: POWER_SAMPLE_INTERVAL_MS,
+	});
+	await tracker.ready;
+
+	let first = true;
+	for (const url of urls) {
+		if (!first) {
+			await Bun.sleep(STRESS_TAB_INTERVAL_MS);
+		}
+		first = false;
+		console.log(`[Test]   [Stress] Opening ${url}...`);
+		await openUrlInBrowser(browser, url);
+	}
+
+	console.log(
+		`[Monitor]  [Stress] All tabs opened. Waiting ${waitTimeSeconds} seconds before closing them...`,
+	);
+	await Bun.sleep(waitTimeSeconds * 1000);
+
+	console.log("[Test]   [Stress] Closing all stress-test tabs...");
+	// use a small safety margin on the repeat count in case a browser opens an extra tab
+	await closeTab(browser, urls.length + 2);
+	await Bun.sleep(WINDOW_CLOSE_DELAY_MS);
+
+	const energy = await tracker.stopTracking();
+	console.log(
+		`[Results] [Stress] Total stress-test energy for ${browser}: ${energy.totalEnergy.toFixed(
+			4,
+		)} mWh`,
+	);
+	return { energy };
+}
+
 type PageEnergy = {
 	url: string;
+	energy: EnergyResult;
+};
+
+type StressTestEnergy = {
 	energy: EnergyResult;
 };
 
@@ -463,10 +509,6 @@ async function preflightBrowsers(browserNames: string[]): Promise<void> {
 	}
 	await Bun.sleep(1000);
 	for (const browser of browserNames) {
-		for (const url of urls) {
-			await openUrlInBrowser(browser, url);
-		}
-
 		await openUrlInBrowser(browser, exampleUrl);
 	}
 
@@ -486,11 +528,8 @@ async function preflightBrowsers(browserNames: string[]): Promise<void> {
 	}
 
 	for (const browser of browserNames) {
-		// close the windows we just opened
-		for (const _ of urls) {
-			await closeTab(browser);
-		}
-		await closeTab(browser);
+		// close the window we just opened
+		await closeTab(browser, 2);
 	}
 
 	if (pauseDuringPreflight) {
@@ -552,6 +591,7 @@ type BrowserReport = BrowserRunResult & {
 	startupEnergy: EnergyResult | null;
 	quitEnergy: EnergyResult | null;
 	perPageEnergy: PageEnergy[];
+	stressTestEnergy: StressTestEnergy | null;
 };
 const overallResults: BrowserReport[] = [];
 let overallEnergy: EnergyResult | null = null;
@@ -592,14 +632,21 @@ await captureScreenshot({
 });
 
 // --- ETC Calculation (exact, from explicit sleeps) ---
-const totalSteps = browsers.length * urls.length;
+// we treat each per-page measurement as one step plus one stress-test step per browser
+const TEST_STEPS_PER_BROWSER = urls.length + 1;
+const totalSteps = browsers.length * TEST_STEPS_PER_BROWSER;
 // per test (per browser):
 // - wait after browser launch
 // - per URL: waitTimeSeconds dwell + close window
+// - stress test: tabs opened at stressTabIntervalSeconds, then waitTimeSeconds dwell, then close all
 // - quit browser
 const TEST_SLEEP_PER_BROWSER_MS =
 	BROWSER_LAUNCH_DELAY_MS +
 	urls.length * (waitTimeSeconds * 1000 + WINDOW_CLOSE_DELAY_MS) +
+	// stress test: open all urls with interval, final dwell, then close all tabs
+	urls.length * STRESS_TAB_INTERVAL_MS +
+	waitTimeSeconds * 1000 +
+	WINDOW_CLOSE_DELAY_MS +
 	BROWSER_QUIT_DELAY_MS;
 const plannedTestMs = browsers.length * TEST_SLEEP_PER_BROWSER_MS;
 console.log(
@@ -671,6 +718,7 @@ for (const browser of browsers) {
 	const browserSamples: number[] = [];
 	const perPageEnergy: PageEnergy[] = [];
 	let startupEnergy: EnergyResult | null = null;
+	let stressTestEnergy: StressTestEnergy | null = null;
 	let quitEnergy: EnergyResult | null = null;
 
 	try {
@@ -709,7 +757,7 @@ for (const browser of browsers) {
 				phase: "before-close-tab",
 			});
 			console.log("[Test]   Closing window...");
-			await closeTab(browser);
+			await closeTab(browser, 2);
 			await Bun.sleep(WINDOW_CLOSE_DELAY_MS);
 
 			const energy = await tracker.stopTracking();
@@ -720,6 +768,15 @@ for (const browser of browsers) {
 			currentStep++;
 			logETC(startTime, currentStep, totalSteps);
 		}
+
+		// 2b. Stress test: open all URLs as separate tabs at a fixed interval, then close them all
+		console.log(`[Monitor] Starting stress test for ${browser}...`);
+		stressTestEnergy = await runStressTestForBrowser(browser);
+		if (stressTestEnergy) {
+			browserSamples.push(...stressTestEnergy.energy.rawSamples);
+		}
+		currentStep++;
+		logETC(startTime, currentStep, totalSteps);
 
 		// 3. Measure browser quit
 		console.log(`[Monitor] Measuring quit energy for ${browser}...`);
@@ -742,6 +799,7 @@ for (const browser of browsers) {
 		console.log("[Results] Aggregating samples...");
 		const totalEnergyMWh =
 			(startupEnergy?.totalEnergy ?? 0) +
+			(stressTestEnergy?.energy.totalEnergy ?? 0) +
 			perPageEnergy.reduce((sum, page) => sum + page.energy.totalEnergy, 0) +
 			(quitEnergy?.totalEnergy ?? 0);
 		const hasData = totalEnergyMWh > 0;
@@ -752,6 +810,7 @@ for (const browser of browsers) {
 			startupEnergy,
 			quitEnergy,
 			perPageEnergy,
+			stressTestEnergy,
 		});
 
 		if (hasData) {
@@ -798,6 +857,7 @@ if (overallResults.length > 0) {
 		const withEnergy = successful.map((r) => {
 			const totalEnergyMWh =
 				(r.startupEnergy?.totalEnergy ?? 0) +
+				(r.stressTestEnergy?.energy.totalEnergy ?? 0) +
 				r.perPageEnergy.reduce(
 					(sum, page) => sum + page.energy.totalEnergy,
 					0,
